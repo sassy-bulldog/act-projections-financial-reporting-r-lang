@@ -1,6 +1,6 @@
 ---
 title: "Monthly Projections"
-date: "2024-03-19"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
 editor_options:
   chunk_output_type: console
 output: html_document
@@ -64,7 +64,6 @@ pacman::p_load(
   lubridate,
   RSQLite
 )
-
 
 proj.env <- new.env()
 set.seed(params$prng_seed) # seed the random number generator
