@@ -85,7 +85,7 @@ LOD Treaties
 
 - Premium dealt with as Written Premium the same as an RA with an addition inherited Unearned Premium Reserve (UEPR) at the effective date.
 
--   Code does not cede back UEPR at the end of the treaty (there are conditions to how this is handled not currently coded / handled well), this is currently handled in the valuation spreadsheet.  
+-   Code does not cede back UEPR at the end of the treaty (there are conditions to how this is handled not currently coded / handled well), this is currently handled in the valuation spreadsheet.
 
 ### Functions
 
@@ -147,7 +147,7 @@ proj.env$development_factors <- read.csv(
 proj.env$extract_dates <- read.csv(
   paste(params$reporting_path, params$exceptions_extract_dates, sep = ""),
   stringsAsFactors = FALSE
-) %>% 
+) %>%
   select(-key) %>%
   mutate(
     extract_to_use = convert_excel_date(extract_to_use)
@@ -197,7 +197,7 @@ dbDisconnect(proj.env$con)
 # Store it as a string and filter to only retain matching rows
 proj.env$latest_refresh_date <- as.Date(max(proj.env$our_db$v_created))
 
-proj.env$our_db_filtered <- proj.env$our_db %>% 
+proj.env$our_db_filtered <- proj.env$our_db %>%
   dplyr::left_join(proj.env$extract_dates, by = c("nre_feed", "treaty_year")) %>%
   dplyr::left_join(proj.env$experience_to_omit, by = c("nre_feed", "treaty_year")) %>%
   dplyr::filter(
@@ -343,9 +343,9 @@ proj.env$date_vector <- seq.Date(as.Date("2020-01-01"), as.Date("2070-12-01"), b
 
 # expand.grid works like a cross_join, but doesn't require the vectors to be dataframes
 proj.env$MonthlyProjections <- expand.grid(
-    Treaty = proj.env$treaty_positions$KEY.,
-    Month = proj.env$date_vector
-  ) %>%
+  Treaty = proj.env$treaty_positions$KEY.,
+  Month = proj.env$date_vector
+) %>%
   left_join(proj.env$treaty_positions, by = c("Treaty" = "KEY.")) %>%
   left_join((proj.env$vel_df3 %>% mutate(MONTH = ym(MONTH))), by = c("Treaty" = "KEY", "Month" = "MONTH")) %>%
   rename(
