@@ -342,7 +342,10 @@ We also join the premium and loss data from DATATODATE, rename columns, and sort
 proj.env$date_vector <- seq.Date(as.Date("2020-01-01"), as.Date("2070-12-01"), by = "month")
 
 # expand.grid works like a cross_join, but doesn't require the vectors to be dataframes
-proj.env$MonthlyProjections <- expand.grid(Treaty = proj.env$treaty_positions$KEY., Month = proj.env$date_vector) %>%
+proj.env$MonthlyProjections <- expand.grid(
+    Treaty = proj.env$treaty_positions$KEY.,
+    Month = proj.env$date_vector
+  ) %>%
   left_join(proj.env$treaty_positions, by = c("Treaty" = "KEY.")) %>%
   left_join((proj.env$vel_df3 %>% mutate(MONTH = ym(MONTH))), by = c("Treaty" = "KEY", "Month" = "MONTH")) %>%
   rename(
@@ -351,6 +354,7 @@ proj.env$MonthlyProjections <- expand.grid(Treaty = proj.env$treaty_positions$KE
     Primary_LOB = Primary.Line.s..of.Business.,
     Secondary_LOB = Secondary.Line.s..of.Business.,
     Effective_Date = Effective.Date.,
+    Expiration_Date = Expiration.Date,
     Suffix = Suffix.,
     RA_or_LOD = RA.or.LOD.,
     Total_Subject_Premium = Total.Subject.Premium.,
@@ -376,7 +380,11 @@ proj.env$MonthlyProjections <- expand.grid(Treaty = proj.env$treaty_positions$KE
     ALAE_Case_Reserve_Data = DATAPARTCASEOSALAE,
     ULAE_Case_Reserve_Data = DATAPARTCASEOSULAE
   ) %>%
-  mutate(Effective_Date = convert_excel_date(Effective_Date)) %>%
+  mutate(
+    Effective_Date = convert_excel_date(Effective_Date),
+    Expiration_Date = convert_excel_date(Expiration_Date),
+    Treaty_Length = months_between(Effective_Date, Expiration_Date)
+  ) %>%
   arrange(Treaty, Month)
 ```
 
@@ -414,6 +422,8 @@ Inherited_UEPR_Pattern <- function(EFF, CAL, PLEN) {
   }
 }
 
+
+
 # Project IUEPR by month using Inherited_UEPR_Pattern function
 proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
   rowwise() %>%
@@ -440,18 +450,19 @@ sum(proj.env$MonthlyProjections$IUEPR_Month)
 
 This step projects share of monthly written premium and revises projections with reported data.
 
-The projection evenly distributes the estimated total written premium across the 12 month treaty period.
+The projection evenly distributes the estimated total written premium across the n month treaty period.
 
 ```{r, Project Business Proportion of Written Premium}
 # Define a function used for projecting monthly written premium
 # Calculates the expected fraction of written premium in a given month by checking if that month
-# is between the effective date and the expiration date (assuming a 12 month Treaty period)
+# is between the effective date and the expiration date
 # EFF = The effective date of the policy, assumed to be the first of the month
 # CAL = The calendar month for which we are calculating the expected written premium, assumed to be the first of the month
-WrittenPattern <- function(EFF, CAL) {
+WrittenPattern <- function(EFF, CAL, TLEN) {
+  TLEN <- min(TLEN, 12)
   treaty_month <- months_between(EFF, CAL)
-  if (treaty_month >= 0 & treaty_month <= 11) {
-    1 / 12 # this is the 12 month assumption
+  if (treaty_month >= 0 & treaty_month < TLEN) {
+    1 / TLEN
   } else {
     0
   }
@@ -463,8 +474,8 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
   dplyr::mutate(
     # Our QS (quota share) of the Estimated Total Written Premium
     WP_Total = Total_Subject_Premium * Target_Participation,
-    # Allocate 1/12 for all months during the treaty period, 0 otherwise
-    WP_Perc = WrittenPattern(Effective_Date, Month),
+    # Allocate 1/n for all months during the treaty period (where n is the number of months the treaty is effective for), 0 otherwise
+    WP_Perc = WrittenPattern(Effective_Date, Month, Treaty_Length),
     # Project monthly written participation
     WP_Monthly = WP_Total * WP_Perc,
   ) %>%
