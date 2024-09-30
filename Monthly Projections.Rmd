@@ -66,7 +66,7 @@ pacman::p_load(
 )
 
 proj.env <- new.env()
-set.seed(params$prng_seed) # seed the random number generator
+# set.seed(params$prng_seed) # seed the random number generator
 # prevent scientific notation for cross-platform compatibility
 options(scipen = 999)
 
@@ -75,17 +75,17 @@ proj.env$time_begin <- Sys.time()
 
 ### Assumptions
 
-Treaty periods are 12 months (e.g. in WrittenPattern function).
+Treaty periods are duration of attached liability from effective date through expiration date (e.g. in WrittenPattern function).
 
 (However, policy length values are defined per treaty in "TREATIES\$Policy.Length".)
 
 Every policy is effective on the first of the month.
 
-LOD Policies
+LOD Treaties
 
--   Underlying policies are paid at inception, generating UEPR (not monthly) (Inherited UEPR)
+- Premium dealt with as Written Premium the same as an RA with an addition inherited Unearned Premium Reserve (UEPR) at the effective date.
 
--   Does not cede back UEPR at the end of the policy
+-   Code does not cede back UEPR at the end of the treaty (there are conditions to how this is handled not currently coded / handled well), this is currently handled in the valuation spreadsheet.
 
 ### Functions
 
@@ -130,7 +130,7 @@ TREATIES contains many details regarding each treaty (e.g. Effective Date, Prior
 
 DEVS are the development factors used for each treaty.
 
-exc_table contains confirmed revisions to the monthly submission data recorded by our data provider.
+overrides_table contains confirmed revisions to the monthly submission data recorded by our data provider.
 
 ```{r, Load Data}
 # Import data and ensure strings aren't recognized as factors
@@ -138,14 +138,41 @@ proj.env$treaty_positions <- read.csv(
   paste(params$reporting_path, params$treaty_positions, sep = ""),
   stringsAsFactors = FALSE
 )
+
 proj.env$development_factors <- read.csv(
   paste(params$reporting_path, params$development_factors, sep = ""),
   stringsAsFactors = FALSE
 )
-proj.env$exc_table <- read.csv(
-  paste(params$reporting_path, params$exceptions_table, sep = ""),
+
+proj.env$extract_dates <- read.csv(
+  paste(params$reporting_path, params$exceptions_extract_dates, sep = ""),
   stringsAsFactors = FALSE
-)
+) %>%
+  select(-key) %>%
+  mutate(
+    extract_to_use = convert_excel_date(extract_to_use)
+  ) %>%
+  rename(extract_to_use_reason = Reason)
+
+proj.env$experience_to_omit <- read.csv(
+  paste(params$reporting_path, params$exceptions_bad_reporting_months, sep = ""),
+  stringsAsFactors = FALSE
+) %>%
+  select(-key) %>%
+  mutate(
+    month_to_exclude = convert_excel_date(month_to_exclude)
+  ) %>%
+  rename(reason_to_drop = Reason)
+
+proj.env$overrides_table <- read.csv(
+  paste(params$reporting_path, params$overrides_table, sep = ""),
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    bordereaux_month = convert_excel_date(bordereaux_month)
+  ) %>%
+  select(-key) %>%
+  rename(reason_to_override = Reason)
 ```
 
 ### Load latest query of data and merge with the Exception Table
@@ -155,14 +182,88 @@ proj.env$con <- dbConnect(
   SQLite(),
   dbname = paste(params$reporting_path, params$database_name, sep = "")
 )
-proj.env$our_db <- dbReadTable(proj.env$con, params$source_data_table_name)
+proj.env$our_db <- dbReadTable(
+  proj.env$con,
+  params$source_data_table_name
+) %>%
+  mutate(
+    bordereaux_month = as.Date(bordereaux_month),
+    v_created = as.Date(v_created),
+    query_date = as.Date(query_date)
+  )
 dbDisconnect(proj.env$con)
 
 # Find the latest query_date.
 # Store it as a string and filter to only retain matching rows
-proj.env$latest_query_date <- format(max(ymd_hm(proj.env$our_db$query_date)), "%Y-%m-%d %H:%M")
-proj.env$our_db_filtered <- proj.env$our_db %>% dplyr::filter(query_date == proj.env$latest_query_date)
+proj.env$latest_refresh_date <- as.Date(max(proj.env$our_db$v_created))
+
+proj.env$our_db_filtered <- proj.env$our_db %>%
+  dplyr::left_join(proj.env$extract_dates, by = c("nre_feed", "treaty_year")) %>%
+  dplyr::left_join(proj.env$experience_to_omit, by = c("nre_feed", "treaty_year")) %>%
+  dplyr::filter(
+    v_created == coalesce(extract_to_use, proj.env$latest_refresh_date),
+    bordereaux_month != coalesce(month_to_exclude, as.Date(format(Sys.Date() + months(1), "%Y-%m-01")))
+  )
 ```
+
+Verify that all data is present and that the latest refresh date is correct.
+
+```{r, Verify Data}
+# Query the original data for rows matching the latest refresh date
+proj.env$our_db_latest <- proj.env$our_db %>%
+  filter(v_created == proj.env$latest_refresh_date)
+
+# Find rows in the original data that are not in the filtered data
+proj.env$missing_rows <- anti_join(
+  proj.env$our_db_latest,
+  proj.env$our_db_filtered,
+  by = c("nre_feed", "treaty_year", "bordereaux_month")
+)
+
+# Check if the missing rows have a reason in the extract_dates or experience_to_omit tables
+proj.env$missing_rows_with_reason <- proj.env$missing_rows %>%
+  left_join(proj.env$extract_dates, by = c("nre_feed", "treaty_year")) %>%
+  left_join(proj.env$experience_to_omit, by = c("nre_feed", "treaty_year")) %>%
+  mutate(
+    reason = coalesce(extract_to_use_reason, reason_to_drop)
+  ) %>%
+  select(
+    nre_feed,
+    treaty_year,
+    bordereaux_month,
+    v_created,
+    reason
+  )
+
+# Print the missing rows with reasons
+print(proj.env$missing_rows_with_reason)
+
+if (
+  nrow(proj.env$missing_rows)
+  + nrow(proj.env$our_db_filtered)
+  != nrow(proj.env$our_db_latest)
+) {
+  stop("Missing rows found in the data. Please investigate.")
+}
+```
+
+Now that we have the latest data validated, we can correct any known exceptions in the data.
+
+```{r, Correct Exceptions}
+# Correct exceptions in the data
+proj.env$our_db_filtered <- proj.env$our_db_filtered %>%
+  left_join(proj.env$overrides_table, by = c("nre_feed", "treaty_year", "bordereaux_month")) %>%
+  mutate(across(
+    starts_with("tf_assumed_"),
+    ~ coalesce(get(paste0("override_", sub("tf_assumed_", "", cur_column()))), .)
+  )) %>%
+  select(
+    colnames(proj.env$our_db_filtered),
+    reason_to_override
+  )
+```
+
+Load the keys we use for projections
 
 ```{r, Translate Source Data to our Index Key}
 # Read in translations from program names to program used by our organization
@@ -171,6 +272,8 @@ proj.env$key_translations <- read.csv(
   stringsAsFactors = FALSE
 )
 ```
+
+Consolidate (Aggregate) source data according to our keys
 
 ```{r, Join and Consolidate Data using Keys}
 # Join the keys to the dataframe
@@ -203,10 +306,10 @@ proj.env$vel_df2 <- proj.env$vel_df1 %>%
   ) %>%
   mutate(
     DATAPARTPAIDLOSSMONTH = tf_assumed_paid_losses - coalesce(tf_assumed_ss, 0),
-    DATAPARTPAIDULAEMONTH = NA,
-    DATAPARTCASEOSALAE = NA,
-    DATAPARTCASEOSULAE = NA,
-    MONTH = year(bordereaux_month) * 100 + month(bordereaux_month)
+    DATAPARTPAIDULAEMONTH = NA, # No data for paid ULAE (yet)
+    DATAPARTCASEOSALAE = NA, # Outstanding ALAE Balance
+    DATAPARTCASEOSULAE = NA, # Outstanding ULAE Balance
+    MONTH = format(bordereaux_month, "%Y%m")
   )
 ```
 
@@ -217,8 +320,8 @@ proj.env$vel_df3 <- proj.env$vel_df2 %>%
   select(
     KEY,
     MONTH,
-    DATAWPARTMONTH,
-    DATAEPARTMONTH,
+    DATAWPARTMONTH, # written premium
+    DATAEPARTMONTH, # earned premium
     DATAPARTPAIDLOSSMONTH,
     DATAPARTPAIDALAEMONTH,
     DATAPARTPAIDULAEMONTH,
@@ -226,54 +329,6 @@ proj.env$vel_df3 <- proj.env$vel_df2 %>%
     DATAPARTCASEOSALAE,
     DATAPARTCASEOSULAE
   )
-```
-
-### Prepare an unabridged Exception Table
-
-The Exception Table only contains a small amount of rows containing data to add or replace to the import from source data provider.
-
-We will expand the Exception Table to contain the full 612 rows for every treaty included in this valuation (a row for each month from 2020 - 2070). These steps will simply retain all original Exception Table rows and add any missing rows with NA values.
-
-```{r, Account for Data Exceptions}
-# Create a table with all 612 months for every treaty
-proj.env$dates <- seq.Date(as.Date("2020-01-01"), as.Date("2070-12-01"), by = "month")
-proj.env$date_vector <- year(proj.env$dates) * 100 + month(proj.env$dates)
-proj.env$full_months <- expand.grid(KEY = as.character(proj.env$treaty_positions$KEY.), MONTH = proj.env$date_vector) %>%
-  mutate(KEY = as.character(KEY)) %>%
-  arrange(KEY)
-```
-
-```{r, Not sure}
-proj.env$monthly_df <- left_join(proj.env$exc_table, proj.env$full_months, by = c("KEY", "MONTH"))
-
-proj.env$monthly_df <- bind_rows(proj.env$exc_table, proj.env$full_months, .id = "source_id") %>%
-  arrange(source_id) %>%
-  group_by(KEY, MONTH) %>%
-  slice(1) %>%
-  ungroup() %>%
-  select(-source_id)
-```
-
-### Merge source data with expanded table
-
-This step will coalesce our expanded monthly table with the source data. We prioritize values in our exception table where they exist, and resort to source data for all entries in the exception table that are NA.
-
-(Note that a value of 0 is not equivalent to NA. NA indicates that there is no observed data for that value, whereas 0 indicates an observed value of 0.)
-
-```{r, Merge Source Data with Expanded Table}
-proj.env$DATATODATE <- proj.env$monthly_df %>%
-  full_join(proj.env$vel_df3, by = c("KEY", "MONTH")) %>%
-  mutate(
-    DATAWPARTMONTH = coalesce(DATAWPARTMONTH.x, DATAWPARTMONTH.y),
-    DATAEPARTMONTH = coalesce(DATAEPARTMONTH.x, DATAEPARTMONTH.y),
-    DATAPARTPAIDLOSSMONTH = coalesce(DATAPARTPAIDLOSSMONTH.x, DATAPARTPAIDLOSSMONTH.y),
-    DATAPARTPAIDALAEMONTH = coalesce(DATAPARTPAIDALAEMONTH.x, DATAPARTPAIDALAEMONTH.y),
-    DATAPARTPAIDULAEMONTH = coalesce(DATAPARTPAIDULAEMONTH.x, DATAPARTPAIDULAEMONTH.y),
-    DATAPARTCASEOSLOSS = coalesce(DATAPARTCASEOSLOSS.x, DATAPARTCASEOSLOSS.y),
-    DATAPARTCASEOSALAE = coalesce(DATAPARTCASEOSALAE.x, DATAPARTCASEOSALAE.y),
-    DATAPARTCASEOSULAE = coalesce(DATAPARTCASEOSULAE.x, DATAPARTCASEOSULAE.y)
-  ) %>%
-  select(KEY, MONTH, DATAWPARTMONTH, DATAEPARTMONTH, DATAPARTPAIDLOSSMONTH, DATAPARTPAIDALAEMONTH, DATAPARTPAIDULAEMONTH, DATAPARTCASEOSLOSS, DATAPARTCASEOSALAE, DATAPARTCASEOSULAE)
 ```
 
 ### Join and Prepare Data
@@ -287,15 +342,19 @@ We also join the premium and loss data from DATATODATE, rename columns, and sort
 proj.env$date_vector <- seq.Date(as.Date("2020-01-01"), as.Date("2070-12-01"), by = "month")
 
 # expand.grid works like a cross_join, but doesn't require the vectors to be dataframes
-proj.env$MonthlyProjections <- expand.grid(Treaty = proj.env$treaty_positions$KEY., Month = proj.env$date_vector) %>%
+proj.env$MonthlyProjections <- expand.grid(
+  Treaty = proj.env$treaty_positions$KEY.,
+  Month = proj.env$date_vector
+) %>%
   left_join(proj.env$treaty_positions, by = c("Treaty" = "KEY.")) %>%
-  left_join((proj.env$DATATODATE %>% mutate(MONTH = ym(MONTH))), by = c("Treaty" = "KEY", "Month" = "MONTH")) %>%
+  left_join((proj.env$vel_df3 %>% mutate(MONTH = ym(MONTH))), by = c("Treaty" = "KEY", "Month" = "MONTH")) %>%
   rename(
     Program_Name = MGA...Program.Name.,
     Carrier = Carrier.,
     Primary_LOB = Primary.Line.s..of.Business.,
     Secondary_LOB = Secondary.Line.s..of.Business.,
     Effective_Date = Effective.Date.,
+    Expiration_Date = Expiration.Date,
     Suffix = Suffix.,
     RA_or_LOD = RA.or.LOD.,
     Total_Subject_Premium = Total.Subject.Premium.,
@@ -321,17 +380,21 @@ proj.env$MonthlyProjections <- expand.grid(Treaty = proj.env$treaty_positions$KE
     ALAE_Case_Reserve_Data = DATAPARTCASEOSALAE,
     ULAE_Case_Reserve_Data = DATAPARTCASEOSULAE
   ) %>%
-  mutate(Effective_Date = convert_excel_date(Effective_Date)) %>%
+  mutate(
+    Effective_Date = convert_excel_date(Effective_Date),
+    Expiration_Date = convert_excel_date(Expiration_Date),
+    Treaty_Length = months_between(Effective_Date, Expiration_Date)
+  ) %>%
   arrange(Treaty, Month)
 ```
 
-### Project Monthly Earned Pattern to Inherited UEPR
+### Project Monthly Earned Pattern against Inherited UEPR
 
 This step projects a monthly earned pattern to the Inherited UEPR, resulting in the IUEPR_Month column.
 
 This only applies to LOD treaties.
 
-```{r, Project Monthly Earned Pattern to Inherited UEPR}
+```{r, Project Monthly Earned Pattern against Inherited UEPR}
 # Define a function used for projecting Inherited UEPR
 # NL: For LOD policies only
 #     LOD policies are comprised of two components,
@@ -359,6 +422,8 @@ Inherited_UEPR_Pattern <- function(EFF, CAL, PLEN) {
   }
 }
 
+
+
 # Project IUEPR by month using Inherited_UEPR_Pattern function
 proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
   rowwise() %>%
@@ -372,7 +437,7 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
 
 The following is a check to ensure that LOD Treaties have their sum of IUEPR_Month equal to IUEPR_Total.
 
-```{r, Validate Loss Occurred During Treaty Period}
+```{r, Validate UEPR calc gets back to total}
 proj.env$MonthlyProjections %>%
   distinct(Treaty, .keep_all = TRUE) %>%
   summarize(Total_IUEPR = sum(IUEPR_Total)) %>%
@@ -385,18 +450,18 @@ sum(proj.env$MonthlyProjections$IUEPR_Month)
 
 This step projects share of monthly written premium and revises projections with reported data.
 
-The projection evenly distributes the estimated total written premium across the 12 month treaty period.
+The projection evenly distributes the estimated total written premium across the n month treaty period.
 
 ```{r, Project Business Proportion of Written Premium}
 # Define a function used for projecting monthly written premium
 # Calculates the expected fraction of written premium in a given month by checking if that month
-# is between the effective date and the expiration date (assuming a 12 month Treaty period)
+# is between the effective date and the expiration date
 # EFF = The effective date of the policy, assumed to be the first of the month
 # CAL = The calendar month for which we are calculating the expected written premium, assumed to be the first of the month
-WrittenPattern <- function(EFF, CAL) {
+WrittenPattern <- function(EFF, CAL, TLEN) {
   treaty_month <- months_between(EFF, CAL)
-  if (treaty_month >= 0 & treaty_month <= 11) {
-    1 / 12
+  if (treaty_month >= 0 & treaty_month < TLEN) {
+    1 / TLEN
   } else {
     0
   }
@@ -408,8 +473,8 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
   dplyr::mutate(
     # Our QS (quota share) of the Estimated Total Written Premium
     WP_Total = Total_Subject_Premium * Target_Participation,
-    # Allocate 1/12 for all months during the treaty period, 0 otherwise
-    WP_Perc = WrittenPattern(Effective_Date, Month),
+    # Allocate 1/n for all months during the treaty period (where n is the number of months the treaty is effective for), 0 otherwise
+    WP_Perc = WrittenPattern(Effective_Date, Month, Treaty_Length),
     # Project monthly written participation
     WP_Monthly = WP_Total * WP_Perc,
   ) %>%
