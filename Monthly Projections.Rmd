@@ -459,7 +459,6 @@ The projection evenly distributes the estimated total written premium across the
 # EFF = The effective date of the policy, assumed to be the first of the month
 # CAL = The calendar month for which we are calculating the expected written premium, assumed to be the first of the month
 WrittenPattern <- function(EFF, CAL, TLEN) {
-  TLEN <- min(TLEN, 12)
   treaty_month <- months_between(EFF, CAL)
   if (treaty_month >= 0 & treaty_month < TLEN) {
     1 / TLEN
