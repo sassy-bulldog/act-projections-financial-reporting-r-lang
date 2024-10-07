@@ -354,7 +354,7 @@ proj.env$MonthlyProjections <- expand.grid(
     Primary_LOB = Primary.Line.s..of.Business.,
     Secondary_LOB = Secondary.Line.s..of.Business.,
     Effective_Date = Effective.Date.,
-    Expiration_Date = Expiration.Date,
+    Expiration_Date = Expiration.Date.,
     Suffix = Suffix.,
     RA_or_LOD = RA.or.LOD.,
     Total_Subject_Premium = Total.Subject.Premium.,
