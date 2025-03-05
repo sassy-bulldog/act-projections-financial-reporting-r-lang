@@ -1,9 +1,11 @@
 ---
-title: "Monthly Projections"
-date: "`r format(Sys.time(), '%d %B, %Y')`"
+title: Monthly Projections
+date: "`r format(Sys.time(), '%B %e, %Y')`"
 editor_options:
   chunk_output_type: console
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 params:
   debug:
     input: checkbox
@@ -20,72 +22,18 @@ params:
   reporting_path:
     input: text
     label: Working directory for the monthly valuation process
-    value: ""
-  database_name:
+    value: 
+  inputs_workbook:
     input: text
-    label: Database file containing monthly data
-    value: ""
-  treaty_csv:
-    input: checkbox
-    label: Read Treaty Positions from CSV instead of Provider DB
-    value: true
-  treaty_positions:
-    input: text
-    label: "Treaty Positions CSV file"
-    value: "Treaties.csv"
-  provider_server_name:
-    input: text
-    label: "Provider Server Name"
-    value: ""
-  provider_port:
-    input: numeric
-    label: "Provider Port"
-    value: 1433
-  provider_database_name:
-    input: text
-    label: "Provider Database Name"
-    value: ""
-  provider_username:
-    input: text
-    label: "Provider Username"
-    value: ""
-  provider_password:
-    input: text
-    label: "Provider Password"
-    value: ""
-  underwriting_lalaes:
-    input: text
-    label: "Underwriting LALAE CSV file"
-    value: "UnderwritingLALAEs.csv"
-  development_factors:
-    input: text
-    label: "Development Factors CSV file"
-    value: "DEVS202412.csv"
-  exceptions_extract_dates:
-    input: text
-    label: "Specific Dates to Use in Source Data"
-    value: "20241231_20241216_SRCDATES.csv"
-  exceptions_bad_reporting_months:
-    input: text
-    label: "Specific Experience Months to Exclude from Source Data"
-    value: "20241231_20241216_EXP_DATES_TO_OMIT.csv"
-  overrides_table:
-    input: text
-    label: "Specific Values to Override in Source Data"
-    value: "20241231_20241216_EXP_OVERRIDES.csv"
-  key_map:
-    input: text
-    label: "Key Translations CSV file"
-    value: ""
-  source_data_table_name:
-    input: text
-    label: "Name of the source data table"
-    value: ""
+    label: Workbook Containing All Inputs Required for this process
+    value: Data for Valuation.xlsx
 ---
 
 ```{r, setup, include=FALSE}
+proj.env <- new.env()
 knitr::opts_chunk$set(echo = params$debug)
 knitr::opts_knit$set(progress = TRUE, verbose = TRUE)
+# params$reporting_path <- gsub("\\","/", params$reporting_path, fixed = TRUE) # platform independent
 print(params$debug)
 ```
 
@@ -94,13 +42,6 @@ print(params$debug)
 ### Initialize Libraries and Environment
 
 ```{r, Initialize Environment}
-# Check if libraries are installed and load them
-pacman::p_load(
-  dplyr,
-  lubridate
-)
-
-proj.env <- new.env()
 # set.seed(params$prng_seed) # seed the random number generator
 # prevent scientific notation for cross-platform compatibility
 options(scipen = 999)
@@ -127,6 +68,12 @@ LOD Treaties
 These are more general functions that can be applied throughout the document. In later sections, context specific functions are defined at the beginning of their respective code blocks.
 
 ```{r, Localized Functions}
+# Returns the Excel range reference (e.g. cell addresses) of a named table in Excel
+getRangeOfTable <- function(wb, sheet, name) {
+  tables = openxlsx::getTables(wb, sheet = sheet)
+  attributes(tables[match(tables, name)])$names
+}
+
 # Return the numeric value of second argument if available.
 # Otherwise, return the value of first argument.
 # (Used to revise projected values with the reported amounts.)
@@ -188,11 +135,6 @@ convert_numeric_to_period <- function(x, p) {
     )
   }
   return(y)
-}
-
-# Convert Excel serial date to date format
-convert_excel_date <- function(excel_date) {
-  as.Date(excel_date, origin = "1899-12-30")
 }
 
 # Function to preserve NAs while summing
@@ -283,92 +225,25 @@ DEVS are the development factors used for each treaty.
 overrides_table contains confirmed revisions to the monthly submission data recorded by our data provider.
 
 ```{r, Load Data}
+proj.env$wb <- openxlsx::loadWorkbook(file.path(params$reporting_path, params$inputs_workbook))
 # Import data and ensure strings aren't recognized as factors
-if (params$treaty_csv) {
-  # Import data and ensure strings aren't recognized as factors
-  proj.env$treaty_positions <- read.csv(
-    paste(params$reporting_path, params$treaty_positions, sep = ""),
-    stringsAsFactors = FALSE
+proj.env$treaty_positions <- 
+  readxl::read_excel(
+    path = file.path(params$reporting_path, params$inputs_workbook),
+    sheet = "Treaties",
+    range = getRangeOfTable(wb = proj.env$wb, sheet = "Treaties", "Treaties_Gold"),
+    col_names = TRUE
   ) %>%
-    rename(
-      KEY = ConcatenatedKey,
-    ) %>%
-    mutate(
-      EffectiveDate = convert_excel_date(EffectiveDate),
-      ExpirationDate = convert_excel_date(ExpirationDate),
-      TreatyLength = months_between(EffectiveDate, ExpirationDate),
-      AssumedPolicyLengthMonths = convert_numeric_to_period(AssumedPolicyLengthMonths, "months"),
-    )
-} else {
-  # Establish a connection to the Microsoft SQL Database
-  proj.env$sqlconn <- DBI::dbConnect(odbc::odbc(),
-    Driver = "ODBC Driver 17 for SQL Server",
-    Server = paste0(params$provider_server_name, ",", params$provider_port),
-    Database = params$provider_database_name,
-    UID = params$provider_username,
-    PWD = params$provider_password
+  rename(
+    KEY = ConcatenatedKey,
+  ) %>%
+  mutate(
+    EffectiveDate = as.Date(EffectiveDate), # openxlsx::convertToDate
+    ExpirationDate = as.Date(ExpirationDate), # openxlsx::convertToDate
+    TreatyLength = months_between(EffectiveDate, ExpirationDate),
+    AssumedPolicyLengthMonths = convert_numeric_to_period(AssumedPolicyLengthMonths, "months"),
+    vellum_key = paste0(VellumProgramName,  "_", YearNum)
   )
-
-  # Query the data from the TreatyTable
-  proj.env$treaty_positions <- DBI::dbGetQuery(proj.env$sqlconn, paste(readLines("TreatyTable.sql"), collapse = "\n")) %>%
-    filter(EffectiveDate <= params$date_of_valuation) %>%
-    rename(
-      KEY = ConcatenatedKey,
-    ) %>%
-    mutate(
-      TreatyLength = months_between(EffectiveDate, ExpirationDate),
-      AssumedPolicyLengthMonths = convert_numeric_to_period(AssumedPolicyLengthMonths, "months"),
-    )
-
-  # Close the database connection
-  DBI::dbDisconnect(proj.env$sqlconn)
-
-  proj.env$underwriting_lalaes <- read.csv(
-    paste(params$reporting_path, params$underwriting_lalaes, sep = ""),
-    stringsAsFactors = FALSE
-  ) %>%
-    select(
-      KEY,
-      Duration.Estimated,
-      LALAE.NoImprovement.Gross,
-      LALAE.HalfImprovement.Gross,
-      LALAE.Market.Gross,
-      LALAE.Industry.Gross,
-      LALAE.NoImprovement.NetCorridorsAndCaps,
-      LALAE.HalfImprovement.NetCorridorsAndCaps,
-      LALAE.Market.NetCorridorsAndCaps,
-      LALAE.Industry.NetCorridorsAndCaps,
-      CR.NoImprovement,
-      CR.HalfImprovement,
-      CR.Market,
-      CR.Industry,
-    )
-
-  # Verify that all keys in the underwriting_lalaes table are present in the treaty_positions table
-  if (any(!proj.env$underwriting_lalaes$KEY %in% proj.env$treaty_positions$KEY)) {
-    proj.env$missing_keys <- unique(proj.env$underwriting_lalaes$KEY[!proj.env$underwriting_lalaes$KEY %in% proj.env$treaty_positions$KEY])
-    warning(paste(
-      "The following keys in the underwriting_lalaes table are not present in the treaty_positions table:\n",
-      paste(proj.env$missing_keys, collapse = "\n")
-    ))
-  }
-
-  if (any(!proj.env$treaty_positions$KEY %in% proj.env$underwriting_lalaes$KEY)) {
-    proj.env$missing_keys <- unique(proj.env$treaty_positions$KEY[!proj.env$treaty_positions$KEY %in% proj.env$underwriting_lalaes$KEY])
-    stop(paste(
-      "The following keys in the treaty_positions table are not present in the underwriting_lalaes table:\n",
-      paste(proj.env$missing_keys, collapse = "\n")
-    ))
-  }
-
-  # Join the underwriting_lalaes table to the treaty_positions table
-  # These are values that our underwriting team is responsible for, and may not be maintained or updated in vendor table in a timely fashion
-  proj.env$treaty_positions <- proj.env$treaty_positions %>%
-    inner_join(
-      proj.env$underwriting_lalaes,
-      by = c("KEY")
-    )
-}
 
 # Check that there is only one row per KEY in the treaty_positions table
 proj.env$duplicates <- proj.env$treaty_positions %>%
@@ -384,12 +259,15 @@ if (length(proj.env$duplicates) > 0) {
   ))
 }
 
-proj.env$development_factors <- read.csv(
-  paste(params$reporting_path, params$development_factors, sep = ""),
-  stringsAsFactors = FALSE
-)
+proj.env$development_factors <- 
+  readxl::read_excel(
+    path = file.path(params$reporting_path, params$inputs_workbook),
+    sheet = "Development Factors",
+    range = getRangeOfTable(wb = proj.env$wb, sheet = "Development Factors", "Development_Factors"),
+    col_names = TRUE
+  )
 
-# Check that there is only one row per grouping of fields "KEY" and "LAG_ACCMONTH" in proj.env$development_factors
+# Check that theopenxlsx::convertTe is only one row per grouping of fields "KEY" and "LAG_ACCMONTH" in proj.env$development_factors
 proj.env$duplicates <- proj.env$development_factors %>%
   group_by(KEY, LAG_ACCMONTH) %>%
   filter(n() > 1) %>%
@@ -402,275 +280,18 @@ if (length(proj.env$duplicates) > 0) {
     paste(proj.env$duplicates, collapse = "\n")
   ))
 }
-
-proj.env$extract_dates <- read.csv(
-  paste(params$reporting_path, params$exceptions_extract_dates, sep = ""),
-  stringsAsFactors = FALSE
-) %>%
-  select(-key) %>%
-  mutate(
-    extract_to_use = convert_excel_date(extract_to_use),
-    nre_feed = as.character(nre_feed),
-    Reason = as.character(Reason)
-  ) %>%
-  rename(extract_to_use_reason = Reason)
-
-# Check that there is only one row per grouping of fields "nre_feed" and "treaty_year" in proj.env$extract_dates
-proj.env$duplicates <- proj.env$extract_dates %>%
-  group_by(nre_feed, treaty_year) %>%
-  filter(n() > 1) %>%
-  select(nre_feed, treaty_year) %>%
-  unique()
-
-if (nrow(proj.env$duplicates) > 0) {
-  stop(paste(
-    "The following nre_feed and treaty_year combinations have more than one row in the extract_dates table:\n",
-    paste(
-      proj.env$duplicates$nre_feed,
-      proj.env$duplicates$treaty_year,
-      collapse = "\n"
-    )
-  ))
-}
-
-proj.env$experience_to_omit <- read.csv(
-  paste(params$reporting_path, params$exceptions_bad_reporting_months, sep = ""),
-  stringsAsFactors = FALSE
-) %>%
-  select(-key) %>%
-  mutate(
-    month_to_exclude = convert_excel_date(month_to_exclude),
-    nre_feed = as.character(nre_feed)
-  ) %>%
-  rename(reason_to_drop = Reason)
-
-# Check that there is only one row per grouping of fields "nre_feed", "treaty_year", and "month_to_exclude" in proj.env$experience_to_omit
-proj.env$duplicates <- proj.env$experience_to_omit %>%
-  group_by(nre_feed, treaty_year, month_to_exclude) %>%
-  filter(n() > 1) %>%
-  select(nre_feed, treaty_year, month_to_exclude) %>%
-  unique()
-
-if (nrow(proj.env$duplicates) > 0) {
-  stop(paste(
-    "The following nre_feed, treaty_year, and month_to_exclude combinations have more than one row in the experience_to_omit table:\n",
-    paste(
-      proj.env$duplicates$nre_feed,
-      proj.env$duplicates$treaty_year,
-      proj.env$duplicates$month_to_exclude,
-      collapse = "\n"
-    )
-  ))
-}
-
-proj.env$overrides_table <- read.csv(
-  paste(params$reporting_path, params$overrides_table, sep = ""),
-  stringsAsFactors = FALSE
-) %>%
-  mutate(
-    bordereaux_month = convert_excel_date(bordereaux_month),
-    nre_feed = as.character(nre_feed)
-  ) %>%
-  select(-key) %>%
-  rename(reason_to_override = Reason)
-
-# Check that there is only one row per grouping of fields "nre_feed", "treaty_year", and "bordereaux_month" in proj.env$overrides_table
-proj.env$duplicates <- proj.env$overrides_table %>%
-  group_by(nre_feed, treaty_year, bordereaux_month) %>%
-  filter(n() > 1) %>%
-  select(nre_feed, treaty_year, bordereaux_month) %>%
-  unique()
-
-if (nrow(proj.env$duplicates) > 0) {
-  stop(paste(
-    "The following nre_feed, treaty_year, and bordereaux_month combinations have more than one row in the overrides_table table:\n",
-    paste(
-      proj.env$duplicates$nre_feed,
-      proj.env$duplicates$treaty_year,
-      proj.env$duplicates$bordereaux_month,
-      collapse = "\n"
-    )
-  ))
-}
 ```
 
 ### Load latest query of data and merge with the Exception Table
 
 ```{r, Query Most Recent Experience Data}
-proj.env$con <- DBI::dbConnect(
-  RSQLite::SQLite(),
-  dbname = paste(params$reporting_path, params$database_name, sep = "")
-)
-
-proj.env$our_db <- DBI::dbReadTable(
-  proj.env$con,
-  params$source_data_table_name
-) %>%
-  mutate(
-    nre_feed = tolower(nre_feed),
-    bordereaux_month = as.Date(bordereaux_month),
-    v_created = as.Date(v_created),
-    query_date = as.Date(query_date)
+proj.env$vel_df <-
+  readxl::read_excel(
+    path = file.path(params$reporting_path, params$inputs_workbook),
+    sheet = "Experience",
+    range = getRangeOfTable(wb = proj.env$wb, sheet = "Experience", "Reporting_Gold"),
+    col_names = TRUE
   )
-
-DBI::dbDisconnect(proj.env$con)
-
-# Check that there is only one row per grouping of fields "nre_feed", "treaty_year", "bordereaux_month", and "v_created" in proj.env$our_db
-proj.env$duplicates <- proj.env$our_db %>%
-  group_by(nre_feed, treaty_year, bordereaux_month, v_created) %>%
-  filter(n() > 1) %>%
-  select(nre_feed, treaty_year, bordereaux_month, v_created) %>%
-  unique()
-
-if (nrow(proj.env$duplicates) > 0) {
-  warning(paste(
-    "The following nre_feed, treaty_year, bordereaux_month, and v_created combinations have more than one row in the our_db table:\n",
-    paste(
-      proj.env$duplicates$nre_feed,
-      proj.env$duplicates$treaty_year,
-      proj.env$duplicates$bordereaux_month,
-      proj.env$duplicates$v_created,
-      collapse = "\n"
-    )
-  ))
-}
-```
-
-Validate the data by checking for missing values in the key columns.
-
-```{r, Check Overrides have matching keys}
-# Check that all keys in the overrides table are present in the data
-if (any(!proj.env$extract_dates$nre_feed %in% proj.env$our_db$nre_feed | !proj.env$extract_dates$treaty_year %in% proj.env$our_db$treaty_year)) {
-  stop("Keys in the extract_dates table are not present in the data.")
-}
-
-if (any(!proj.env$experience_to_omit$nre_feed %in% proj.env$our_db$nre_feed | !proj.env$experience_to_omit$treaty_year %in% proj.env$our_db$treaty_year)) {
-  stop("Keys in the experience_to_omit table are not present in the data.")
-}
-```
-
-Apply Overrides to address data issues and filter data by Valuation Date
-
-```{r, Apply Overrides and Filter Data by Valuation Date}
-# Find the latest query_date.
-# Store it as a string and filter to only retain matching rows
-proj.env$latest_refresh_date <- as.Date(max(proj.env$our_db$v_created))
-
-proj.env$our_db_filtered <- proj.env$our_db %>%
-  dplyr::left_join(proj.env$extract_dates, by = c("nre_feed", "treaty_year")) %>%
-  dplyr::left_join(proj.env$experience_to_omit, by = c("nre_feed", "treaty_year", "bordereaux_month" = "month_to_exclude")) %>%
-  dplyr::filter(
-    v_created == coalesce(extract_to_use, proj.env$latest_refresh_date),
-    bordereaux_month <= params$date_of_valuation,
-    is.na(reason_to_drop),
-  )
-```
-
-Verify that all data is present and that the latest refresh date is correct.
-
-```{r, Verify Data}
-# Query the original data for rows matching the latest refresh date
-proj.env$our_db_latest <- proj.env$our_db %>%
-  filter(v_created == proj.env$latest_refresh_date)
-
-# Find rows in the original data that are not in the filtered data
-proj.env$missing_rows <- anti_join(
-  proj.env$our_db_latest,
-  proj.env$our_db_filtered,
-  by = c("nre_feed", "treaty_year", "bordereaux_month")
-)
-
-# Check if the missing rows have a reason in the extract_dates or experience_to_omit tables
-proj.env$missing_rows_with_reason <- proj.env$missing_rows %>%
-  left_join(proj.env$extract_dates, by = c("nre_feed", "treaty_year")) %>%
-  left_join(
-    proj.env$experience_to_omit,
-    by = c("nre_feed", "treaty_year", "bordereaux_month" = "month_to_exclude")
-  ) %>%
-  mutate(
-    reason = coalesce(extract_to_use_reason, reason_to_drop)
-  ) %>%
-  select(
-    nre_feed,
-    treaty_year,
-    bordereaux_month,
-    v_created,
-    reason
-  )
-
-# Print the missing rows with reasons
-print(proj.env$missing_rows_with_reason)
-
-if (
-  nrow(proj.env$missing_rows)
-  + nrow(proj.env$our_db_filtered)
-  != nrow(proj.env$our_db_latest)
-) {
-  stop("Missing rows found in the data. Please investigate.")
-}
-```
-
-Validate that any exceptions in the data have a matching key.
-
-```{r, Validate Exceptions}
-# Check that all keys in the exceptions table are present in the data
-if (any(!proj.env$overrides_table$nre_feed %in% proj.env$our_db$nre_feed & !proj.env$overrides_table$treaty_year %in% proj.env$our_db$treaty_year & !proj.env$overrides_table$bordereaux_month %in% proj.env$our_db$bordereaux_month)) {
-  stop("Keys in the exceptions table are not present in the data.")
-}
-```
-
-Now that we have the latest data validated, we can correct any known exceptions in the data.
-
-```{r, Correct Exceptions}
-# Correct exceptions in the data
-proj.env$our_db_filtered <- proj.env$our_db_filtered %>%
-  left_join(proj.env$overrides_table, by = c("nre_feed", "treaty_year", "bordereaux_month")) %>%
-  mutate(across(
-    starts_with("tf_assumed_"),
-    ~ coalesce(get(paste0("override_", sub("tf_assumed_", "", cur_column()))), .)
-  )) %>%
-  select(
-    colnames(proj.env$our_db_filtered),
-    reason_to_override
-  )
-```
-
-Load the keys we use for projections
-
-```{r, Translate Source Data to our Index Key}
-# Read in translations from program names to program used by our organization
-proj.env$key_translations <- read.csv(
-  paste(params$reporting_path, params$key_map, sep = ""),
-  stringsAsFactors = FALSE
-) %>%
-  dplyr::mutate(
-    nre_feed = tolower(nre_feed)
-  )
-```
-
-Validate the key mappings by checking the source table.
-
-```{r, Check Mappings have matching keys}
-# Check if there are any rows in our_db_filtered that do not have matching keys in key_translations
-proj.env$missing_keys <- proj.env$our_db_filtered %>%
-  anti_join(proj.env$key_translations, by = c("nre_feed", "treaty_year")) %>%
-  select(nre_feed, treaty_year) %>%
-  distinct()
-
-if (nrow(proj.env$missing_keys) > 0) {
-  stop(paste(
-    "The following keys in the experience table are not present in the key_translations table:\n",
-    paste(proj.env$missing_keys$nre_feed, proj.env$missing_keys$treaty_year, collapse = "\n")
-  ))
-}
-```
-
-Consolidate (Aggregate) source data according to our keys
-
-```{r, Join and Consolidate Data using Keys}
-# Join the keys to the dataframe
-proj.env$vel_df <- proj.env$our_db_filtered %>%
-  left_join(proj.env$key_translations, by = c("nre_feed", "treaty_year"))
 ```
 
 This step consolidates treaties that were broken out by our data provider into a single treaty.
@@ -679,7 +300,7 @@ This step consolidates treaties that were broken out by our data provider into a
 # Rows are grouped by KEY and month.
 # All numeric values are summed and NAs are preserved.
 proj.env$vel_df1 <- proj.env$vel_df %>%
-  group_by(KEY, bordereaux_month) %>%
+  group_by(key, bordereaux_month) %>%
   summarize(across(where(is.numeric), sum_with_na),
     across(where(~ is.numeric(.x)), first),
     .groups = "drop"
@@ -710,7 +331,7 @@ Consolidate to only keeping relevant columns
 ```{r, Consolidate Data}
 proj.env$vel_df3 <- proj.env$vel_df2 %>%
   select(
-    KEY,
+    key,
     MONTH,
     DATAWPARTMONTH, # written premium
     DATAEPARTMONTH, # earned premium
@@ -727,8 +348,8 @@ Validate the keys in the experience table exist in the treaty position table.
 
 ```{r, Check experience keys match treaty position keys}
 # Check that all keys to map exist in the treaty table
-if (any(!proj.env$vel_df3$KEY %in% proj.env$treaty_positions$KEY)) {
-  proj.env$missing_keys <- unique(proj.env$vel_df3$KEY[!proj.env$vel_df3$KEY %in% proj.env$treaty_positions$KEY])
+if (any(!proj.env$vel_df3$key %in% proj.env$treaty_positions$vellum_key)) {
+  proj.env$missing_keys <- unique(proj.env$vel_df3$key[!proj.env$vel_df3$key %in% proj.env$treaty_positions$vellum_key])
   stop(paste(
     "The following keys in the experience table are not present in the treaty_positions table:\n",
     paste(proj.env$missing_keys, collapse = "\n")
@@ -758,7 +379,7 @@ proj.env$MonthlyProjections <- expand.grid(
       proj.env$vel_df3 %>%
         mutate(MONTH = lubridate::ym(MONTH))
     ),
-    by = c("KEY", "MONTH")
+    by = c("vellum_key" = "key", "MONTH")
   ) %>%
   rename(
     Effective_Date = EffectiveDate,
@@ -1275,7 +896,6 @@ proj.env$today <- format(Sys.Date(), "%Y%m%d")
 
 # Create the file name
 proj.env$file_name <- paste0(
-  params$reporting_path,
   proj.env$today, "_",
   format(as.Date(params$date_of_valuation, "%Y-%m-%d"), "%Y%m%d"),
   ifelse(params$treaty_csv, "_CSV", ""),
@@ -1285,7 +905,7 @@ proj.env$file_name <- paste0(
 # Export the Monthly Projections to a csv file with the dynamic file name
 write.csv(
   proj.env$MonthlyProjections,
-  file = proj.env$file_name,
+  file = file.path(params$reporting_path, proj.env$file_name),
   row.names = FALSE
 )
 ```
