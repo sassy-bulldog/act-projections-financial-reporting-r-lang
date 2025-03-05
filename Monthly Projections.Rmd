@@ -22,7 +22,7 @@ params:
   reporting_path:
     input: text
     label: Working directory for the monthly valuation process
-    value: 
+    value:
   inputs_workbook:
     input: text
     label: Workbook Containing All Inputs Required for this process
@@ -70,7 +70,7 @@ These are more general functions that can be applied throughout the document. In
 ```{r, Localized Functions}
 # Returns the Excel range reference (e.g. cell addresses) of a named table in Excel
 getRangeOfTable <- function(wb, sheet, name) {
-  tables = openxlsx::getTables(wb, sheet = sheet)
+  tables <- openxlsx::getTables(wb, sheet = sheet)
   attributes(tables[match(tables, name)])$names
 }
 
@@ -227,7 +227,7 @@ overrides_table contains confirmed revisions to the monthly submission data reco
 ```{r, Load Data}
 proj.env$wb <- openxlsx::loadWorkbook(file.path(params$reporting_path, params$inputs_workbook))
 # Import data and ensure strings aren't recognized as factors
-proj.env$treaty_positions <- 
+proj.env$treaty_positions <-
   readxl::read_excel(
     path = file.path(params$reporting_path, params$inputs_workbook),
     sheet = "Treaties",
@@ -242,7 +242,7 @@ proj.env$treaty_positions <-
     ExpirationDate = as.Date(ExpirationDate), # openxlsx::convertToDate
     TreatyLength = months_between(EffectiveDate, ExpirationDate),
     AssumedPolicyLengthMonths = convert_numeric_to_period(AssumedPolicyLengthMonths, "months"),
-    vellum_key = paste0(VellumProgramName,  "_", YearNum)
+    vellum_key = paste0(VellumProgramName, "_", YearNum)
   )
 
 # Check that there is only one row per KEY in the treaty_positions table
@@ -259,7 +259,7 @@ if (length(proj.env$duplicates) > 0) {
   ))
 }
 
-proj.env$development_factors <- 
+proj.env$development_factors <-
   readxl::read_excel(
     path = file.path(params$reporting_path, params$inputs_workbook),
     sheet = "Development Factors",
