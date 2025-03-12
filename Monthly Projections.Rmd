@@ -35,6 +35,8 @@ knitr::opts_chunk$set(echo = params$debug)
 knitr::opts_knit$set(progress = TRUE, verbose = TRUE)
 # params$reporting_path <- gsub("\\","/", params$reporting_path, fixed = TRUE) # platform independent
 print(params$debug)
+# running as R works fine, but knitting fails without this line below
+pacman::p_load("dplyr", "lubridate")
 ```
 
 ## Monthly Projections
