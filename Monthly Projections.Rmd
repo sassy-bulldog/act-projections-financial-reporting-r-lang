@@ -90,6 +90,7 @@ months_between <- function(startDate, endDate) {
   if (length(startDate) != length(endDate)) stop("Length of startDate and endDate must be the same.")
 
   num_months <- mapply(function(s, e) {
+    if (is.na(s)) return(NA)
     if (lubridate::day(s) == lubridate::day(e + 1)) {
       e <- e + lubridate::days(1)
     }
