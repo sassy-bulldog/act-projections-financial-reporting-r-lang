@@ -577,8 +577,8 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
   )
 
 # Validate that all EP has been attributed
-proj.env$total_ep_src = sum(proj.env$table2_Earning_Pattern$EP_Monthly)
-proj.env$total_ep_prj = sum(proj.env$MonthlyProjections$EP_Monthly)
+proj.env$total_ep_src <- sum(proj.env$table2_Earning_Pattern$EP_Monthly)
+proj.env$total_ep_prj <- sum(proj.env$MonthlyProjections$EP_Monthly)
 if (proj.env$total_ep_src != proj.env$total_ep_prj) {
   stop("Not all forecasted earned premium was allocated to the projection table!")
 }
