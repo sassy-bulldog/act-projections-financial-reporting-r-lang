@@ -18,7 +18,7 @@ params:
   date_of_valuation:
     input: date
     label: Date of Valuation
-    value: "2024-12-31"
+    value: "2025-03-31"
   reporting_path:
     input: text
     label: Working directory for the monthly valuation process
@@ -512,6 +512,7 @@ proj.env$table1_Earning_Pattern <- proj.env$MonthlyProjections %>%
     WP_Monthly,
     Expiration_Date,
   ) %>%
+  filter(WP_Month <= Expiration_Date) %>%
   rowwise() %>%
   mutate(
     EP_Months = list(seq.Date(WP_Month, as.Date(lubridate::ceiling_date(WP_Month %m+% Policy_Length, "month") - 1), by = "month")),
@@ -551,13 +552,14 @@ proj.env$table2_Earning_Pattern <- proj.env$table1_Earning_Pattern %>%
   # Sum across WP months because it's irrelevant which WP month it was sourced from, rather only when it was earned
   group_by(
     KEY,
-    EP_Month
+    EP_Month,
   ) %>%
   summarize(
     EP_Monthly = sum(EP_Monthly),
     EP_TransferredToNextTreaty = sum(EP_TransferredToNextTreaty),
     DUEPR_Balance = sum(DUEPR_Balance),
   )
+
 
 # Join the earned premiums (EP_Monthly) to MonthlyProjections
 proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
@@ -574,20 +576,45 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
     DUEPR_Balance = tidyr::replace_na(DUEPR_Balance, 0)
   )
 
-# Validate that the sum of EP_Monthly equals the sum of WP_Monthly
-proj.env$total_wp_monthly <- sum(proj.env$MonthlyProjections$WP_Monthly, na.rm = TRUE)
-proj.env$total_ep_monthly <- (
-  sum(proj.env$MonthlyProjections$EP_Monthly, na.rm = TRUE)
-  + sum(proj.env$MonthlyProjections$EP_TransferredToNextTreaty, na.rm = TRUE)
-)
+# Validate that all EP has been attributed
+proj.env$total_ep_src = sum(proj.env$table2_Earning_Pattern$EP_Monthly)
+proj.env$total_ep_prj = sum(proj.env$MonthlyProjections$EP_Monthly)
+if (proj.env$total_ep_src != proj.env$total_ep_prj) {
+  stop("Not all forecasted earned premium was allocated to the projection table!")
+}
 
-if (abs(proj.env$total_wp_monthly - proj.env$total_ep_monthly) > 0.01) {
-  stop("Total WP_Monthly and Total EP_Monthly are not equal.")
-  # we need to account for the Written Premium that will not be earned in LOD Treaties
+# Validate that the sum of projected earned premium reconciles to the written premium in treaty period
+proj.env$EP_Check <- proj.env$MonthlyProjections %>%
+  mutate(
+    WP_InTreatyPeriod = dplyr::if_else(MONTH <= Expiration_Date, WP_Monthly, 0)
+  ) %>%
+  group_by(
+    KEY
+  ) %>%
+  summarize(
+    total_ep_monthly = sum(EP_Monthly + EP_TransferredToNextTreaty, na.rm = TRUE),
+    total_wp_monthly = sum(WP_InTreatyPeriod, na.rm = TRUE)
+  ) %>%
+  mutate(
+    Difference = abs(total_wp_monthly - total_ep_monthly),
+    PercentDifference = Difference / ifelse(total_ep_monthly != 0, total_ep_monthly, NA)
+  ) %>%
+  filter(Difference > 1 | PercentDifference > 0.01)
+
+
+# Moved the check to after we replace actual EP, because since we no longer calculate post
+# Need another check earlier where the EP appended = original table and that subcalc has totals that match
+if (nrow(proj.env$EP_Check) > 0) {
+  stop(paste(
+    "Total WP_Monthly and Total EP_Monthly are not equal for the following KEY(s):",
+    paste(proj.env$EP_Check$KEY, proj.env$EP_Check$total_ep_monthly, proj.env$EP_Check$total_wp_monthly, proj.env$EP_Check$Difference, collapse = "\n")
+  ))
 }
 
 proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
   mutate(
+    # Swap out actual earned premium where reported
+    EP_Monthly = datareplace(EP_Monthly, EP_Monthly_Data),
     # Projected Earned Participation by Month = Inherited UEPR + Exposure Policy Earned Premium
     EP_Monthly_Incl_IUEPR = IUEPR_Monthly + EP_Monthly,
     # Swapping out Projected EP for Actual EP where available
@@ -608,6 +635,33 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
     # IUEPR_Balance = IUEPR_Total - cumsum(IUEPR_Monthly),
   ) %>%
   ungroup()
+
+
+# Validate that the sum of EP_Monthly equals the sum of WP_Monthly
+
+proj.env$EP_Check <- proj.env$MonthlyProjections %>%
+  group_by(
+    KEY
+  ) %>%
+  summarize(
+    total_ep_monthly = sum(EP_Monthly + EP_TransferredToNextTreaty - IUEPR_Monthly, na.rm = TRUE),
+    total_wp_monthly = sum(WP_Monthly, na.rm = TRUE)
+  ) %>%
+  mutate(
+    Difference = abs(total_wp_monthly - total_ep_monthly),
+    PercentDifference = Difference / ifelse(total_ep_monthly != 0, total_ep_monthly, NA)
+  ) %>%
+  filter(PercentDifference > 0.01)
+
+
+# Moved the check to after we replace actual EP, because since we no longer calculate post
+# Need another check earlier where the EP appended = original table and that subcalc has totals that match
+if (nrow(proj.env$EP_Check) > 0) {
+  warning(paste(
+    "Total WP_Monthly and Total EP_Monthly are not equal for the following KEY(s):",
+    paste(proj.env$EP_Check$KEY, proj.env$EP_Check$total_ep_monthly, proj.env$EP_Check$total_wp_monthly, proj.env$EP_Check$Difference, collapse = "\n")
+  ))
+}
 ```
 
 ### Undeveloping Earned Premiums for Projecting Paid and Reported Losses
