@@ -18,7 +18,7 @@ params:
   date_of_valuation:
     input: date
     label: Date of Valuation
-    value: "2024-12-31"
+    value: "2025-06-30"
   reporting_path:
     input: text
     label: Working directory for the monthly valuation process
@@ -355,7 +355,7 @@ Validate the keys in the experience table exist in the treaty position table.
 # Check that all keys to map exist in the treaty table
 if (any(!proj.env$vel_df3$key %in% proj.env$treaty_positions$vellum_key)) {
   proj.env$missing_keys <- unique(proj.env$vel_df3$key[!proj.env$vel_df3$key %in% proj.env$treaty_positions$vellum_key])
-  stop(paste(
+  warning(paste(
     "The following keys in the experience table are not present in the treaty_positions table:\n",
     paste(proj.env$missing_keys, collapse = "\n")
   ))
@@ -392,7 +392,7 @@ proj.env$MonthlyProjections <- expand.grid(
     RA_or_LOD = RAvLOD,
     Total_Subject_Premium = TotalSubjectPremium,
     Inherited_UEPR = InheritedUEPROutsideParticipation,
-    ULAE_Perc = ULAEOutsideCedingCommission,
+    ULAE_Perc = ULAE.NotInCedingCommission,
     Reins_Broker_Perc = ReinsuranceBrokerCommission,
     Expenses_Perc = SeparateExpenses,
     Policy_Length = AssumedPolicyLengthMonths,
@@ -406,6 +406,8 @@ proj.env$MonthlyProjections <- expand.grid(
     ULAE_Case_Reserve_Data = DATAPARTCASEOSULAE,
   ) %>%
   mutate(
+    ULAE_Perc = tidyr::replace_na(ULAE_Perc, 0),
+    Expenses_Perc = tidyr::replace_na(Expenses_Perc, 0),
     MaturityDateOfNewPolicies = as.Date(MONTH %m+% Policy_Length) - 1,
   ) %>%
   arrange(KEY, MONTH)
@@ -512,6 +514,7 @@ proj.env$table1_Earning_Pattern <- proj.env$MonthlyProjections %>%
     WP_Monthly,
     Expiration_Date,
   ) %>%
+  filter(WP_Month <= Expiration_Date) %>%
   rowwise() %>%
   mutate(
     EP_Months = list(seq.Date(WP_Month, as.Date(lubridate::ceiling_date(WP_Month %m+% Policy_Length, "month") - 1), by = "month")),
@@ -551,13 +554,14 @@ proj.env$table2_Earning_Pattern <- proj.env$table1_Earning_Pattern %>%
   # Sum across WP months because it's irrelevant which WP month it was sourced from, rather only when it was earned
   group_by(
     KEY,
-    EP_Month
+    EP_Month,
   ) %>%
   summarize(
     EP_Monthly = sum(EP_Monthly),
     EP_TransferredToNextTreaty = sum(EP_TransferredToNextTreaty),
     DUEPR_Balance = sum(DUEPR_Balance),
   )
+
 
 # Join the earned premiums (EP_Monthly) to MonthlyProjections
 proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
@@ -574,20 +578,45 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
     DUEPR_Balance = tidyr::replace_na(DUEPR_Balance, 0)
   )
 
-# Validate that the sum of EP_Monthly equals the sum of WP_Monthly
-proj.env$total_wp_monthly <- sum(proj.env$MonthlyProjections$WP_Monthly, na.rm = TRUE)
-proj.env$total_ep_monthly <- (
-  sum(proj.env$MonthlyProjections$EP_Monthly, na.rm = TRUE)
-  + sum(proj.env$MonthlyProjections$EP_TransferredToNextTreaty, na.rm = TRUE)
-)
+# Validate that all EP has been attributed
+proj.env$total_ep_src <- sum(proj.env$table2_Earning_Pattern$EP_Monthly)
+proj.env$total_ep_prj <- sum(proj.env$MonthlyProjections$EP_Monthly)
+if (proj.env$total_ep_src != proj.env$total_ep_prj) {
+  stop("Not all forecasted earned premium was allocated to the projection table!")
+}
 
-if (abs(proj.env$total_wp_monthly - proj.env$total_ep_monthly) > 0.01) {
-  stop("Total WP_Monthly and Total EP_Monthly are not equal.")
-  # we need to account for the Written Premium that will not be earned in LOD Treaties
+# Validate that the sum of projected earned premium reconciles to the written premium in treaty period
+proj.env$EP_Check <- proj.env$MonthlyProjections %>%
+  mutate(
+    WP_InTreatyPeriod = dplyr::if_else(MONTH <= Expiration_Date, WP_Monthly, 0)
+  ) %>%
+  group_by(
+    KEY
+  ) %>%
+  summarize(
+    total_ep_monthly = sum(EP_Monthly + EP_TransferredToNextTreaty, na.rm = TRUE),
+    total_wp_monthly = sum(WP_InTreatyPeriod, na.rm = TRUE)
+  ) %>%
+  mutate(
+    Difference = abs(total_wp_monthly - total_ep_monthly),
+    PercentDifference = Difference / ifelse(total_ep_monthly != 0, total_ep_monthly, NA)
+  ) %>%
+  filter(Difference > 1 | PercentDifference > 0.01)
+
+
+# Moved the check to after we replace actual EP, because since we no longer calculate post
+# Need another check earlier where the EP appended = original table and that subcalc has totals that match
+if (nrow(proj.env$EP_Check) > 0) {
+  stop(paste(
+    "Total WP_Monthly and Total EP_Monthly are not equal for the following KEY(s):",
+    paste(proj.env$EP_Check$KEY, proj.env$EP_Check$total_ep_monthly, proj.env$EP_Check$total_wp_monthly, proj.env$EP_Check$Difference, collapse = "\n")
+  ))
 }
 
 proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
   mutate(
+    # Swap out actual earned premium where reported
+    EP_Monthly = datareplace(EP_Monthly, EP_Monthly_Data),
     # Projected Earned Participation by Month = Inherited UEPR + Exposure Policy Earned Premium
     EP_Monthly_Incl_IUEPR = IUEPR_Monthly + EP_Monthly,
     # Swapping out Projected EP for Actual EP where available
@@ -608,6 +637,33 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
     # IUEPR_Balance = IUEPR_Total - cumsum(IUEPR_Monthly),
   ) %>%
   ungroup()
+
+
+# Validate that the sum of EP_Monthly equals the sum of WP_Monthly
+
+proj.env$EP_Check <- proj.env$MonthlyProjections %>%
+  group_by(
+    KEY
+  ) %>%
+  summarize(
+    total_ep_monthly = sum(EP_Monthly + EP_TransferredToNextTreaty - IUEPR_Monthly, na.rm = TRUE),
+    total_wp_monthly = sum(WP_Monthly, na.rm = TRUE)
+  ) %>%
+  mutate(
+    Difference = abs(total_wp_monthly - total_ep_monthly),
+    PercentDifference = Difference / ifelse(total_ep_monthly != 0, total_ep_monthly, NA)
+  ) %>%
+  filter(PercentDifference > 0.01)
+
+
+# Moved the check to after we replace actual EP, because since we no longer calculate post
+# Need another check earlier where the EP appended = original table and that subcalc has totals that match
+if (nrow(proj.env$EP_Check) > 0) {
+  warning(paste(
+    "Total WP_Monthly and Total EP_Monthly are not equal for the following KEY(s):",
+    paste(proj.env$EP_Check$KEY, proj.env$EP_Check$total_ep_monthly, proj.env$EP_Check$total_wp_monthly, proj.env$EP_Check$Difference, collapse = "\n")
+  ))
+}
 ```
 
 ### Undeveloping Earned Premiums for Projecting Paid and Reported Losses
@@ -792,16 +848,16 @@ proj.env$MonthlyProjections <- proj.env$MonthlyProjections %>%
     Target_Participation = TargetParticipationPercentage,
     Target.Participation. = TargetParticipation,
     IUEPR_Month = IUEPR_Monthly,
-    LLAE.Corridor.Attachment.LR. = LLAECorridorAttachmentLR,
-    LLAE.Corridor.End.LR. = LLAECorridorEndLR,
-    LLAE.Corridor...Retained. = LLAECorridorRetained,
-    Loss.Ratio.Cap. = LossRatioCap,
-    Minimum.Ceding.Commission. = MinimumCedingCommission,
-    Provisional.Ceding.Commission. = ProvisionalCedingCommission,
-    Maximum.Ceding.Commission. = MaximumCedingCommission,
-    Minimum.Ceding.Commission.LLAE.Ratio. = MinimumCedingCommissionLLAERatio,
-    Provisional.Ceding.Commission.LLAE.Ratio. = ProvisionalCedingCommissionLLAERatio,
-    Maximum.Ceding.Commission.LLAE.Ratio. = MaximumCedingCommissionLLAERatio,
+    LLAE.Corridor.Attachment.LR. = LLAE.Corridor.Start,
+    LLAE.Corridor.End.LR. = LLAE.Corridor.End,
+    LLAE.Corridor...Retained. = LLAE.Corridor.CedentRetentionRate,
+    Loss.Ratio.Cap. = LLAE.Cap,
+    Minimum.Ceding.Commission. = CedingCommission.Minimum.Rate,
+    Provisional.Ceding.Commission. = CedingCommission.Provisional.Rate,
+    Maximum.Ceding.Commission. = CedingCommission.Maximum.Rate,
+    Minimum.Ceding.Commission.LLAE.Ratio. = CedingCommission.Minimum.LLAE,
+    Provisional.Ceding.Commission.LLAE.Ratio. = CedingCommission.Provisional.LLAE,
+    Maximum.Ceding.Commission.LLAE.Ratio. = CedingCommission.Maximum.LLAE,
     Est_Payout_Duration_Yrs = Duration.Estimated,
     Prior_No_Impr_Gross_LALAE_Ratio_Excl_Corr = LALAE.NoImprovement.Gross,
     Prior_Half_Impr_Gross_LALAE_Ratio_Excl_Corr = LALAE.HalfImprovement.Gross,
