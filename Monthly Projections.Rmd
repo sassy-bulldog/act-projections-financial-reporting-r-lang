@@ -18,11 +18,11 @@ params:
   date_of_valuation:
     input: date
     label: Date of Valuation
-    value: "2025-06-30"
+    value: "2025-09-30"
   reporting_path:
     input: text
     label: Working directory for the monthly valuation process
-    value:
+    value: !r getwd()
   inputs_workbook:
     input: text
     label: Workbook Containing All Inputs Required for this process
@@ -36,6 +36,7 @@ knitr::opts_knit$set(progress = TRUE, verbose = TRUE)
 # params$reporting_path <- gsub("\\","/", params$reporting_path, fixed = TRUE) # platform independent
 print(params$debug)
 # running as R works fine, but knitting fails without this line below
+renv::activate()
 pacman::p_load("dplyr", "lubridate")
 ```
 
@@ -47,7 +48,7 @@ pacman::p_load("dplyr", "lubridate")
 # set.seed(params$prng_seed) # seed the random number generator
 # prevent scientific notation for cross-platform compatibility
 options(scipen = 999)
-
+renv::status()
 proj.env$time_begin <- Sys.time()
 ```
 
