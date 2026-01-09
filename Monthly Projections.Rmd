@@ -18,7 +18,7 @@ params:
   date_of_valuation:
     input: date
     label: Date of Valuation
-    value: "2025-09-30"
+    value: "2025-12-31"
   reporting_path:
     input: text
     label: Working directory for the monthly valuation process
@@ -552,6 +552,7 @@ proj.env$table2_Earning_Pattern <- proj.env$table1_Earning_Pattern %>%
   ) %>%
   # Remove all rows that don't have an Earned Premium. (And retain negative earned premiums.)
   dplyr::filter(WP_Monthly != 0) %>%
+  ungroup() %>%
   # Sum across WP months because it's irrelevant which WP month it was sourced from, rather only when it was earned
   group_by(
     KEY,
@@ -561,6 +562,7 @@ proj.env$table2_Earning_Pattern <- proj.env$table1_Earning_Pattern %>%
     EP_Monthly = sum(EP_Monthly),
     EP_TransferredToNextTreaty = sum(EP_TransferredToNextTreaty),
     DUEPR_Balance = sum(DUEPR_Balance),
+    .groups = "drop"
   )
 
 
@@ -747,7 +749,8 @@ proj.env$t_Loss_2 <- proj.env$t_Loss %>%
   ) %>%
   summarize(
     EP_Undev_Paid = sum(EP_Undev_Paid),
-    EP_Undev_Reported = sum(EP_Undev_Reported)
+    EP_Undev_Reported = sum(EP_Undev_Reported),
+    .groups = "drop"
   ) %>%
   # ungroup() %>% # ungroup shouldn't be needed because summarize will have collapsed the rows by the group_by columns
   # either that or a new group by treaty should be used?
